@@ -1,0 +1,14 @@
+# Registo de longo prazo (Fase C, passo 12 do briefing).
+# InfluxDB corre no mesmo docker-compose, acessível pelo nome do serviço
+# "influxdb" na rede interna do Docker (não precisa do IP do host).
+influxdb:
+  max_retries: 3
+  include:
+    domains:
+      - sensor
+      - binary_sensor
+      - switch
+      - climate
+      - cover
+      - input_boolean
+      - input_number

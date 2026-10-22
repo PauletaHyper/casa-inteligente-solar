@@ -1,0 +1,455 @@
+# ==========================================================================
+# GESTAO DE EXCEDENTE SOLAR - versao 2 (2026-10-07)
+# SolaX X1-Hybrid-3.7kW + termossifao (Tuya, ~2035 W, switch com medicao)
+# ==========================================================================
+# Baseada na analise de 22/09-06/10 (DADOS.md): o excedente e pouco e curto
+# (~2 kWh/dia, sobretudo 13h-16h, so quando a bateria esta quase cheia).
+# Estrategia: deslocar a resistencia do termossifao para a janela solar,
+# mantendo um bloco de manha (banhos) e um apoio ao fim da tarde se o sol
+# nao chegou. Tarifa simples: nao ha "vazio" a aproveitar.
+#
+# Sinais confirmados:
+#   sensor.solax_inverter_measured_power      positivo = injecao, negativo = importacao
+#   sensor.solax_inverter_battery_power_charge positivo = a carregar, negativo = a descarregar
+#
+# O AC do quarto do Filho foi retirado da automacao a 09/10 (decisao do
+# Filho e do pai: nao faz sentido ligar o AC automaticamente).
+# Piscina (filtragem + bomba de calor) esta fora de epoca - logica antiga
+# em arquivo/excedente_solar_v1_rascunho.yaml.
+#
+# TODAS as automacoes de controlo dependem de gestao_excedente_ativa = on.
+# Antes de ligar a gestao, apagar os temporizadores do termossifao na app
+# Smart Life (senao a app e o HA controlam o mesmo aparelho em paralelo).
+# ==========================================================================
+
+input_boolean:
+  gestao_excedente_ativa:
+    name: Gestao automatica por excedente
+    icon: mdi:solar-power-variant
+
+  # Marca execucoes por horario (manha, apoio da tarde, anti-legionella)
+  # para a logica solar nao as interromper.
+  termo_execucao_forcada:
+    name: Termossifao - execucao por horario em curso
+    icon: mdi:clock-check-outline
+
+# Valores iniciais definidos uma vez pela UI/API (sem "initial", para nao
+# repor os valores a cada reinicio).
+input_number:
+  termo_soc_ligar:
+    name: Termossifao - SoC minimo para ligar com sol
+    min: 50
+    max: 100
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:battery-high
+  termo_soc_desligar:
+    name: Termossifao - SoC abaixo do qual desliga
+    min: 30
+    max: 100
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:battery-medium
+  termo_excedente_ligar:
+    name: Termossifao - injecao media minima para ligar
+    min: 0
+    max: 3000
+    step: 50
+    unit_of_measurement: W
+    icon: mdi:transmission-tower-export
+  termo_descarga_max:
+    name: Termossifao - descarga maxima da bateria tolerada
+    min: 0
+    max: 3000
+    step: 50
+    unit_of_measurement: W
+    icon: mdi:battery-arrow-down
+  termo_import_max:
+    name: Termossifao - importacao maxima tolerada
+    min: 0
+    max: 2000
+    step: 50
+    unit_of_measurement: W
+    icon: mdi:transmission-tower-import
+  termo_horas_solar_alvo:
+    name: Termossifao - horas com sol por dia (alvo)
+    min: 0
+    max: 4
+    step: 0.25
+    unit_of_measurement: h
+    icon: mdi:white-balance-sunny
+  termo_horas_minimas_tarde:
+    name: Termossifao - minimo de horas ate as 17h30 (senao apoio)
+    min: 0
+    max: 3
+    step: 0.25
+    unit_of_measurement: h
+    icon: mdi:weather-sunset
+  termo_minutos_manha:
+    name: Termossifao - duracao do bloco da manha
+    min: 0
+    max: 120
+    step: 5
+    unit_of_measurement: min
+    icon: mdi:weather-sunset-up
+  termo_minutos_legionella:
+    name: Termossifao - duracao do ciclo semanal anti-legionella
+    min: 60
+    max: 240
+    step: 10
+    unit_of_measurement: min
+    icon: mdi:bacteria-outline
+
+timer:
+  bloqueio_termossifao:
+    name: Bloqueio termossifao (anti-oscilacao)
+    duration: "00:10:00"
+    restore: true
+
+sensor:
+  # Medias para decidir com estabilidade (nao com cada nuvem).
+  # keep_last_sample: o valor da rede fica muitas vezes parado em 0.0 e
+  # sem isto a media ficaria "unknown".
+  - platform: statistics
+    name: "Rede media 5min"
+    unique_id: rede_media_5min
+    entity_id: sensor.solax_inverter_measured_power
+    state_characteristic: mean
+    max_age:
+      minutes: 5
+    sampling_size: 200
+    keep_last_sample: true
+
+  - platform: statistics
+    name: "Bateria media 5min"
+    unique_id: bateria_media_5min
+    entity_id: sensor.solax_inverter_battery_power_charge
+    state_characteristic: mean
+    max_age:
+      minutes: 5
+    sampling_size: 200
+    keep_last_sample: true
+
+  - platform: history_stats
+    name: "Termossifao horas hoje"
+    unique_id: termossifao_horas_hoje
+    entity_id: switch.termossifao_interruptor
+    state: "on"
+    type: time
+    start: "{{ today_at('00:00') }}"
+    end: "{{ now() }}"
+
+  # So o tempo a partir das 10h (o bloco da manha nao conta para o alvo solar).
+  - platform: history_stats
+    name: "Termossifao horas desde 10h"
+    unique_id: termossifao_horas_desde_10h
+    entity_id: switch.termossifao_interruptor
+    state: "on"
+    type: time
+    start: "{{ today_at('10:00') }}"
+    end: "{{ [now(), today_at('10:00')] | max }}"
+
+# Desligar com novas tentativas: a 13/10 as 08:00 a cloud Tuya rejeitou o
+# comando ("sign invalid"), a automacao parou e o termossifao ficou ligado
+# ate a seguranca das 3 h (10:00). Tenta ate 6 vezes, de 30 em 30 s.
+script:
+  # Ligar com novas tentativas (22/10: as 07:00 a cloud Tuya falhou ao
+  # ligar e o bloco da manha parou). Ate 6 vezes, de 30 em 30 s.
+  termossifao_on_uma_vez:
+    alias: "Termossifao - ligar (um comando)"
+    mode: parallel
+    sequence:
+      - action: switch.turn_on
+        target: {entity_id: switch.termossifao_interruptor}
+
+  termossifao_ligar:
+    alias: "Termossifao - ligar (com novas tentativas)"
+    mode: queued
+    sequence:
+      - repeat:
+          sequence:
+            - action: script.turn_on
+              target: {entity_id: script.termossifao_on_uma_vez}
+            - wait_template: "{{ is_state('switch.termossifao_interruptor', 'on') }}"
+              timeout: "00:00:30"
+          until: "{{ is_state('switch.termossifao_interruptor', 'on') or repeat.index >= 6 }}"
+      - if: "{{ not is_state('switch.termossifao_interruptor', 'on') }}"
+        then:
+          - action: persistent_notification.create
+            data:
+              title: "Termossifao"
+              message: "Nao consegui ligar o termossifao (6 tentativas). Verificar na app Smart Life."
+
+  termossifao_off_uma_vez:
+    alias: "Termossifao - desligar (um comando)"
+    mode: parallel
+    sequence:
+      - action: switch.turn_off
+        target: {entity_id: switch.termossifao_interruptor}
+
+  termossifao_desligar:
+    alias: "Termossifao - desligar (com novas tentativas)"
+    mode: queued
+    sequence:
+      - repeat:
+          sequence:
+            # 15/10: o comando corre num script a parte (script.turn_on),
+            # para um erro da cloud ("sign invalid") nao interromper as
+            # novas tentativas.
+            - action: script.turn_on
+              target: {entity_id: script.termossifao_off_uma_vez}
+            - wait_template: "{{ is_state('switch.termossifao_interruptor', 'off') }}"
+              timeout: "00:00:30"
+          until: "{{ is_state('switch.termossifao_interruptor', 'off') or repeat.index >= 6 }}"
+      - if: "{{ not is_state('switch.termossifao_interruptor', 'off') }}"
+        then:
+          - action: persistent_notification.create
+            data:
+              title: "Termossifao"
+              message: "Nao consegui desligar o termossifao (6 tentativas). Verificar na app Smart Life."
+
+automation:
+
+  # ===== SOL: LIGAR =====
+  - id: termossifao_solar_ligar
+    alias: "Termossifao - ligar com excedente solar"
+    mode: single
+    trigger:
+      - platform: time_pattern
+        minutes: "/2"
+    condition:
+      - condition: state
+        entity_id: input_boolean.gestao_excedente_ativa
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.termo_execucao_forcada
+        state: "off"
+      - condition: state
+        entity_id: switch.termossifao_interruptor
+        state: "off"
+      - condition: state
+        entity_id: timer.bloqueio_termossifao
+        state: idle
+      - condition: time
+        after: "10:30:00"
+        before: "17:00:00"
+      - condition: template
+        value_template: >
+          {{ states('sensor.solax_inverter_battery_capacity') | float(0)
+             >= states('input_number.termo_soc_ligar') | float(95)
+             and states('sensor.rede_media_5min') | float(-9999)
+             >= states('input_number.termo_excedente_ligar') | float(500)
+             and states('sensor.termossifao_horas_desde_10h') | float(0)
+             < states('input_number.termo_horas_solar_alvo') | float(1.5) }}
+    action:
+      - action: script.termossifao_ligar
+      - service: timer.start
+        target:
+          entity_id: timer.bloqueio_termossifao
+
+  # ===== SOL: DESLIGAR =====
+  # O inversor tapa defices com a bateria antes de importar, por isso a
+  # descarga da bateria e o SoC contam tanto como a importacao.
+  - id: termossifao_solar_desligar
+    alias: "Termossifao - desligar quando o sol nao chega"
+    mode: single
+    trigger:
+      - platform: time_pattern
+        minutes: "/1"
+    condition:
+      - condition: state
+        entity_id: input_boolean.gestao_excedente_ativa
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.termo_execucao_forcada
+        state: "off"
+      - condition: state
+        entity_id: switch.termossifao_interruptor
+        state: "on"
+      - condition: state
+        entity_id: timer.bloqueio_termossifao
+        state: idle
+      - condition: template
+        value_template: >
+          {{ states('sensor.bateria_media_5min') | float(0)
+               < 0 - states('input_number.termo_descarga_max') | float(1000)
+             or states('sensor.solax_inverter_battery_capacity') | float(0)
+               < states('input_number.termo_soc_desligar') | float(85)
+             or states('sensor.rede_media_5min') | float(0)
+               < 0 - states('input_number.termo_import_max') | float(300)
+             or states('sensor.termossifao_horas_desde_10h') | float(0)
+               >= states('input_number.termo_horas_solar_alvo') | float(1.5)
+             or now() >= today_at('17:00') }}
+    action:
+      - action: script.termossifao_desligar
+      - service: timer.start
+        target:
+          entity_id: timer.bloqueio_termossifao
+
+  # ===== HORARIO: MANHA (banhos) =====
+  - id: termossifao_bloco_manha
+    alias: "Termossifao - bloco da manha"
+    mode: single
+    trigger:
+      - platform: time
+        at: "07:00:00"
+    condition:
+      - condition: state
+        entity_id: input_boolean.gestao_excedente_ativa
+        state: "on"
+      - condition: numeric_state
+        entity_id: input_number.termo_minutos_manha
+        above: 0
+    action:
+      - service: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.termo_execucao_forcada
+      - action: script.termossifao_ligar
+      - delay:
+          minutes: "{{ states('input_number.termo_minutos_manha') | int(60) }}"
+      - action: script.termossifao_desligar
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.termo_execucao_forcada
+
+  # ===== HORARIO: APOIO AO FIM DA TARDE (banhos da noite) =====
+  # Se o sol nao deu o minimo, completa ate ao alvo (entre 30 e 90 min).
+  - id: termossifao_apoio_tarde
+    alias: "Termossifao - apoio ao fim da tarde"
+    mode: single
+    trigger:
+      - platform: time
+        at: "17:30:00"
+    condition:
+      - condition: state
+        entity_id: input_boolean.gestao_excedente_ativa
+        state: "on"
+      - condition: template
+        value_template: >
+          {{ states('sensor.termossifao_horas_desde_10h') | float(0)
+             < states('input_number.termo_horas_minimas_tarde') | float(1) }}
+    action:
+      - variables:
+          minutos: >
+            {% set falta = states('input_number.termo_horas_solar_alvo') | float(1.5)
+                           - states('sensor.termossifao_horas_desde_10h') | float(0) %}
+            {{ [[(falta * 60) | round(0) | int, 30] | max, 90] | min }}
+      - service: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.termo_execucao_forcada
+      - action: script.termossifao_ligar
+      - delay:
+          minutes: "{{ minutos }}"
+      - action: script.termossifao_desligar
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.termo_execucao_forcada
+
+  # ===== ANTI-LEGIONELLA (semanal, domingo, na janela solar) =====
+  # SEM SENSOR DE TEMPERATURA: nao e possivel confirmar que a agua chega
+  # aos 60 C. Depende do termostato da propria resistencia estar a >= 60 C.
+  - id: termossifao_antilegionella
+    alias: "Termossifao - ciclo semanal anti-legionella"
+    mode: single
+    trigger:
+      - platform: time
+        at: "13:00:00"
+    condition:
+      - condition: state
+        entity_id: input_boolean.gestao_excedente_ativa
+        state: "on"
+      - condition: time
+        weekday:
+          - sun
+    action:
+      - service: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.termo_execucao_forcada
+      - action: script.termossifao_ligar
+      - delay:
+          minutes: "{{ states('input_number.termo_minutos_legionella') | int(150) }}"
+      - action: script.termossifao_desligar
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.termo_execucao_forcada
+
+  # ===== SEGURANCA: LIMPEZA APOS REINICIO =====
+  # Se o HA reiniciar a meio de um bloco por horario, o "delay" perde-se e o
+  # termossifao ficaria ligado. Ao arrancar, desliga e limpa a marca.
+  - id: termossifao_limpeza_arranque
+    alias: "Termossifao - limpeza apos reinicio"
+    mode: single
+    trigger:
+      - platform: homeassistant
+        event: start
+    condition:
+      - condition: state
+        entity_id: input_boolean.termo_execucao_forcada
+        state: "on"
+    action:
+      - action: script.termossifao_desligar
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.termo_execucao_forcada
+
+  # ===== SEGURANCA: TEMPO MAXIMO LIGADO =====
+  - id: termossifao_tempo_maximo
+    alias: "Termossifao - tempo maximo ligado"
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: switch.termossifao_interruptor
+        to: "on"
+        for: "03:00:00"
+    condition:
+      - condition: state
+        entity_id: input_boolean.gestao_excedente_ativa
+        state: "on"
+    action:
+      - action: script.termossifao_desligar
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.termo_execucao_forcada
+      - service: persistent_notification.create
+        data:
+          title: "Termossifao desligado"
+          message: "Esteve ligado mais de 3 horas seguidas - desligado por seguranca."
+
+  # ===== SEGURANCA: PERDA DE DADOS DO INVERSOR =====
+  # Corrige a falha da v1: no incidente de 18/09 os sensores ficaram
+  # congelados (nao passaram a "unavailable"). Aqui vigia-se a taxa de
+  # comunicacao e a idade da ultima leitura.
+  - id: vigilancia_inversor
+    alias: "Vigilancia - inversor sem dados"
+    mode: single
+    trigger:
+      - platform: numeric_state
+        entity_id: sensor.solax_inverter_communication_success_rate
+        below: 50
+        for: "00:10:00"
+      - platform: template
+        value_template: >
+          {% set s = states.sensor.solax_inverter_house_load %}
+          {{ s is none or (now() - s.last_reported) > timedelta(minutes=10) }}
+    condition:
+      - condition: state
+        entity_id: input_boolean.gestao_excedente_ativa
+        state: "on"
+    action:
+      - action: script.termossifao_desligar
+      - service: input_boolean.turn_off
+        target:
+          entity_id:
+            - input_boolean.termo_execucao_forcada
+            - input_boolean.gestao_excedente_ativa
+      # Marca que foi a vigilancia a desligar: resiliencia.yaml volta a
+      # ligar a gestao sozinha quando os dados do inversor regressarem.
+      - action: input_boolean.turn_on
+        target: {entity_id: input_boolean.gestao_pausada_inversor}
+      - service: persistent_notification.create
+        data:
+          title: "Inversor sem dados"
+          message: >
+            Sem dados fiaveis da SolaX ha 10 minutos. Gestao automatica
+            pausada e termossifao desligado. Volta a ligar-se sozinha quando
+            os dados regressarem.

@@ -1,0 +1,182 @@
+# ==========================================================================
+# RESILIENCIA (2026-10-14) - depois do incidente de 14/10
+# ==========================================================================
+# 14/10: o Windows Update reiniciou o portatil as 01:50, o HA so voltou as
+# 09:23 e o dongle SolaX ficou agarrado a ligacao antiga. Aqui:
+#  1. Aviso no telemovel do Filho quando o HA arranca depois de uma
+#     paragem (com quanto tempo esteve parado).
+#  2. Inversor sem dados ha 10 min -> recarrega a integracao SolaX; se 15
+#     min depois continuar sem dados -> aviso "tira e volta a por o dongle"
+#     (no maximo 1 por hora). Quando os dados voltam, religa a gestao
+#     solar se tiver sido a vigilancia a pausa-la.
+#  3. Estores: se o HA esteve parado a hora de abrir, abre ao arrancar
+#     (so os grupos cuja hora passou durante a paragem, e so de dia).
+# ==========================================================================
+
+input_datetime:
+  ha_ultimo_sinal:
+    name: HA - ultimo sinal de vida
+    has_date: true
+    has_time: true
+  solax_ultimo_reload:
+    name: SolaX - ultima recarga automatica
+    has_date: true
+    has_time: true
+  solax_ultimo_aviso:
+    name: SolaX - ultimo aviso do dongle
+    has_date: true
+    has_time: true
+
+input_boolean:
+  gestao_pausada_inversor:
+    name: Gestao solar pausada por falta de dados do inversor
+    icon: mdi:solar-power-variant-outline
+
+automation:
+
+  # Marca a hora a cada 2 min: ao arrancar sabe-se quando o HA parou.
+  - id: ha_sinal_de_vida
+    alias: "HA - sinal de vida (2 min)"
+    mode: single
+    trigger:
+      - {trigger: time_pattern, minutes: "/2"}
+    action:
+      - action: input_datetime.set_datetime
+        target: {entity_id: input_datetime.ha_ultimo_sinal}
+        data: {timestamp: "{{ now().timestamp() }}"}
+
+  # ===== 1. AVISO DE ARRANQUE =====
+  - id: ha_arranque_aviso
+    alias: "HA - aviso de arranque depois de paragem"
+    mode: single
+    trigger:
+      - {trigger: homeassistant, event: start}
+    action:
+      - variables:
+          parou: "{{ state_attr('input_datetime.ha_ultimo_sinal', 'timestamp') | float(0) }}"
+          minutos: "{{ ((now().timestamp() - parou) / 60) | round(0) | int if parou > 0 else 0 }}"
+      - if: "{{ minutos >= 5 }}"
+        then:
+          - action: notify.mobile_app_tlm_filho
+            data:
+              title: "Home Assistant voltou"
+              message: >-
+                Esteve parado das {{ parou | timestamp_custom('%H:%M (%d/%m)') }}
+                às {{ now().strftime('%H:%M') }}
+                ({{ (minutos / 60) | round(1) if minutos >= 60 else minutos }}
+                {{ 'h' if minutos >= 60 else 'min' }}).
+      - action: input_datetime.set_datetime
+        target: {entity_id: input_datetime.ha_ultimo_sinal}
+        data: {timestamp: "{{ now().timestamp() }}"}
+
+  # ===== 2. INVERSOR: RECUPERACAO AUTOMATICA =====
+  - id: solax_recuperar
+    alias: "SolaX - recuperar ligacao ao inversor"
+    mode: single
+    trigger:
+      - {trigger: time_pattern, minutes: "/5"}
+    condition:
+      # Sem leituras novas ha mais de 10 min (cobre "indisponivel" e
+      # valores congelados).
+      - >-
+        {% set s = states.sensor.solax_inverter_house_load %}
+        {{ s is none or (now() - s.last_reported) > timedelta(minutes=10) }}
+    action:
+      - variables:
+          ultimo_reload: "{{ state_attr('input_datetime.solax_ultimo_reload', 'timestamp') | float(0) }}"
+          ultimo_aviso: "{{ state_attr('input_datetime.solax_ultimo_aviso', 'timestamp') | float(0) }}"
+          agora: "{{ now().timestamp() }}"
+      - choose:
+          # Ainda nao se tentou recarregar (ou ja foi ha mais de 1 h).
+          - conditions: "{{ agora - ultimo_reload > 3600 }}"
+            sequence:
+              - action: homeassistant.reload_config_entry
+                target: {entity_id: sensor.solax_inverter_house_load}
+                continue_on_error: true
+              - action: input_datetime.set_datetime
+                target: {entity_id: input_datetime.solax_ultimo_reload}
+                data: {timestamp: "{{ agora }}"}
+          # Recarregou-se ha 15+ min e continua sem dados -> avisar (1x/hora).
+          - conditions: "{{ agora - ultimo_reload > 900 and agora - ultimo_aviso > 3600 }}"
+            sequence:
+              - action: notify.mobile_app_tlm_filho
+                data:
+                  title: "Inversor sem dados"
+                  message: >-
+                    O HA nao recebe dados do inversor e recarregar a ligacao
+                    nao resolveu. Tira o dongle Wi-Fi do inversor 10 s e volta
+                    a po-lo.
+              - action: input_datetime.set_datetime
+                target: {entity_id: input_datetime.solax_ultimo_aviso}
+                data: {timestamp: "{{ agora }}"}
+
+  # Dados de volta -> religar a gestao solar se foi a vigilancia a pausa-la.
+  - id: solax_dados_voltaram
+    alias: "SolaX - dados voltaram: religar gestao solar"
+    mode: single
+    trigger:
+      - trigger: state
+        entity_id: sensor.solax_inverter_house_load
+    condition:
+      - {condition: state, entity_id: input_boolean.gestao_pausada_inversor, state: "on"}
+      - "{{ has_value('sensor.solax_inverter_house_load') }}"
+    action:
+      - action: input_boolean.turn_on
+        target: {entity_id: input_boolean.gestao_excedente_ativa}
+      - action: input_boolean.turn_off
+        target: {entity_id: input_boolean.gestao_pausada_inversor}
+      - action: notify.mobile_app_tlm_filho
+        data:
+          title: "Inversor voltou"
+          message: "Os dados do inversor voltaram e a gestao solar foi religada."
+
+  # ===== 3. ESTORES: RECUPERAR A ABERTURA PERDIDA =====
+  - id: estores_recuperar_abertura
+    alias: "Estores - abrir o que ficou por abrir durante a paragem"
+    mode: single
+    trigger:
+      - {trigger: homeassistant, event: start}
+    condition:
+      - {condition: state, entity_id: input_boolean.gestao_estores_ativa, state: "on"}
+      - {condition: state, entity_id: input_boolean.estores_modo_ferias, state: "off"}
+      - {condition: state, entity_id: sun.sun, state: above_horizon}
+    action:
+      # Hora em que o HA parou (lida antes de o aviso de arranque a atualizar).
+      - variables:
+          parou: "{{ state_attr('input_datetime.ha_ultimo_sinal', 'timestamp') | float(0) }}"
+      - delay: "00:01:30"
+      - variables:
+          util: "{{ is_state('binary_sensor.workday_sensor_pt', 'on') }}"
+          grupos: >-
+            {% set geral_util = ['cover.estores_da_suite', 'cover.estores_do_closet',
+                 'cover.estores_do_escritorio_do_pai', 'cover.escadas_rooftop', 'cover.rooftop',
+                 'cover.janela_rooftop', 'cover.estores_da_sala', 'cover.estores_da_sala_de_estar',
+                 'cover.estores_da_cozinha', 'cover.estores_do_escritorio_da_mae'] %}
+            {% set geral_fds = ['cover.escadas_rooftop', 'cover.rooftop', 'cover.janela_rooftop',
+                 'cover.estores_da_sala', 'cover.estores_da_sala_de_estar',
+                 'cover.estores_da_cozinha', 'cover.estores_do_escritorio_da_mae'] %}
+            {% if util %}
+              {% set g = [('input_datetime.estores_util_garagem', ['cover.estore_da_garagem']),
+                          ('input_datetime.estores_util_wc_suite', ['cover.estores_da_casa_de_banho_da_suite']),
+                          ('input_datetime.estores_util_geral', geral_util),
+                          ('input_datetime.estores_util_filho', ['cover.estores_do_quarto_do_filho_cortina'])] %}
+            {% else %}
+              {% set g = [('input_datetime.estores_fds_garagem', ['cover.estore_da_garagem']),
+                          ('input_datetime.estores_fds_geral', geral_fds)] %}
+            {% endif %}
+            {% set ns = namespace(l=[]) %}
+            {% for hora, alvos in g %}
+              {% set t = today_at(states(hora)).timestamp() %}
+              {% if parou < t <= now().timestamp() %}{% set ns.l = ns.l + alvos %}{% endif %}
+            {% endfor %}
+            {{ ns.l }}
+      - if: "{{ grupos | count > 0 }}"
+        then:
+          - action: script.estores_mover
+            data:
+              acao: abrir
+              alvos: "{{ grupos }}"
+          - action: notify.mobile_app_tlm_filho
+            data:
+              title: "Estores"
+              message: "Abri {{ grupos | count }} estore(s) que ficaram por abrir enquanto o HA esteve parado."

@@ -1,0 +1,162 @@
+# ==========================================================================
+# ESTORES - correcao do sentido (2026-10-12)
+# ==========================================================================
+# Estores Tuya "clkg" com control_back_mode = "forward" (todos menos o
+# quarto do Filho). Na Tuya, percent_control 100 = aberto e 0 = fechado,
+# e isto bate sempre certo com a realidade. Mas:
+#  - a integracao Tuya mostra a posicao invertida (aberto = 0 %);
+#  - os comandos abrir/fechar (control open/close) NAO sao fiaveis: as
+#    21:00 de 12/10 o "fechar" nao fechou estes estores, e no escritorio
+#    do Pai estavam trocados.
+# Por isso cada estore tem aqui uma versao corrigida que:
+#  - mostra a posicao certa (100 - posicao do original);
+#  - 13/10 noite (verificado no codigo da integracao): open/close/
+#    set_position enviam SO percent_control (um unico DP). Com posicao
+#    disponivel, open_cover do original = Tuya 0 (fecha) e close_cover
+#    = Tuya 100 (abre) nos "forward". FECHAR = posicao 100 no original
+#    (Tuya 0); ABRIR = close_cover do original (Tuya 100).
+#  - A posicao e calculada pelo tempo de curso calibrado no modulo: a
+#    subir a partir de fechado para a ~50 % (calibracao curta). Solucao:
+#    recalibrar cada estore na Smart Life.
+#  - 13/10 19:01-23:40: sala, sala de estar e cozinha nao obedeciam nem
+#    pelo interruptor da parede (modulos bloqueados); resolvido a
+#    reiniciar o disjuntor dos estores do piso 0.
+#  - nota antiga: nestes estores os comandos da integracao estao TROCADOS: o
+#    open_cover do original FECHA e o close_cover ABRE (13/10: "abrir"
+#    fechou a sala; 12/10: "fechar" nao fechou nada; escritorio do Pai
+#    igual). Por isso: abrir = close_cover do original, fechar =
+#    open_cover do original - ambos ate ao fim de curso.
+#  - posicoes intermedias (25 %) pela percentagem; e por tempo de curso
+#    calibrado, por isso aproximado (a subir por % para a ~50 %).
+# Os originais (cover.*_cortina) ficam escondidos e nao devem ser usados.
+# ==========================================================================
+
+template:
+  - cover:
+      # Garagem: o estore local (tuya-local) perde a ligacao varias vezes
+      # por hora. Este "envelope" abre/fecha pelo script com reserva cloud
+      # (estores_automacao.yaml) e mostra a posicao do local quando ha.
+      - name: "Estore da garagem"
+        unique_id: estore_garagem_envelope
+        device_class: shutter
+        position: "{{ state_attr('cover.estore_da_garagem_local', 'current_position') }}"
+        open_cover:
+          action: script.turn_on
+          target: {entity_id: script.estore_garagem_mover}
+          data: {variables: {acao: abrir}}
+        close_cover:
+          action: script.turn_on
+          target: {entity_id: script.estore_garagem_mover}
+          data: {variables: {acao: fechar}}
+        stop_cover: {action: cover.stop_cover, target: {entity_id: cover.estore_da_garagem_local}}
+        set_cover_position: {action: cover.set_cover_position, target: {entity_id: cover.estore_da_garagem_local}, data: {position: "{{ position }}"}}
+
+      - name: "Estores da sala"
+        unique_id: estore_sala
+        device_class: shutter
+        position: "{{ 100 - (state_attr('cover.estores_da_sala_cortina', 'current_position') | int(100)) }}"
+        availability: "{{ has_value('cover.estores_da_sala_cortina') }}"
+        open_cover: {action: cover.close_cover, target: {entity_id: cover.estores_da_sala_cortina}}
+        close_cover: {action: cover.set_cover_position, data: {position: 100}, target: {entity_id: cover.estores_da_sala_cortina}}
+        stop_cover: {action: cover.stop_cover, target: {entity_id: cover.estores_da_sala_cortina}}
+        set_cover_position: {action: cover.set_cover_position, target: {entity_id: cover.estores_da_sala_cortina}, data: {position: "{{ 100 - position }}"}}
+
+      - name: "Estores da sala de estar"
+        unique_id: estore_sala_de_estar
+        device_class: shutter
+        position: "{{ 100 - (state_attr('cover.estores_da_sala_de_estar_cortina', 'current_position') | int(100)) }}"
+        availability: "{{ has_value('cover.estores_da_sala_de_estar_cortina') }}"
+        open_cover: {action: cover.close_cover, target: {entity_id: cover.estores_da_sala_de_estar_cortina}}
+        close_cover: {action: cover.set_cover_position, data: {position: 100}, target: {entity_id: cover.estores_da_sala_de_estar_cortina}}
+        stop_cover: {action: cover.stop_cover, target: {entity_id: cover.estores_da_sala_de_estar_cortina}}
+        set_cover_position: {action: cover.set_cover_position, target: {entity_id: cover.estores_da_sala_de_estar_cortina}, data: {position: "{{ 100 - position }}"}}
+
+      - name: "Estores da cozinha"
+        unique_id: estore_cozinha
+        device_class: shutter
+        position: "{{ 100 - (state_attr('cover.estores_da_cozinha_cortina', 'current_position') | int(100)) }}"
+        availability: "{{ has_value('cover.estores_da_cozinha_cortina') }}"
+        open_cover: {action: cover.close_cover, target: {entity_id: cover.estores_da_cozinha_cortina}}
+        close_cover: {action: cover.set_cover_position, data: {position: 100}, target: {entity_id: cover.estores_da_cozinha_cortina}}
+        stop_cover: {action: cover.stop_cover, target: {entity_id: cover.estores_da_cozinha_cortina}}
+        set_cover_position: {action: cover.set_cover_position, target: {entity_id: cover.estores_da_cozinha_cortina}, data: {position: "{{ 100 - position }}"}}
+
+      - name: "Estores do escritório da Mãe"
+        unique_id: estore_escritorio_mae
+        device_class: shutter
+        position: "{{ 100 - (state_attr('cover.estores_do_escritorio_da_mae_cortina', 'current_position') | int(100)) }}"
+        availability: "{{ has_value('cover.estores_do_escritorio_da_mae_cortina') }}"
+        open_cover: {action: cover.close_cover, target: {entity_id: cover.estores_do_escritorio_da_mae_cortina}}
+        close_cover: {action: cover.set_cover_position, data: {position: 100}, target: {entity_id: cover.estores_do_escritorio_da_mae_cortina}}
+        stop_cover: {action: cover.stop_cover, target: {entity_id: cover.estores_do_escritorio_da_mae_cortina}}
+        set_cover_position: {action: cover.set_cover_position, target: {entity_id: cover.estores_do_escritorio_da_mae_cortina}, data: {position: "{{ 100 - position }}"}}
+
+      - name: "Estores da suite"
+        unique_id: estore_suite
+        device_class: shutter
+        position: "{{ 100 - (state_attr('cover.estores_da_suite_cortina', 'current_position') | int(100)) }}"
+        availability: "{{ has_value('cover.estores_da_suite_cortina') }}"
+        open_cover: {action: cover.close_cover, target: {entity_id: cover.estores_da_suite_cortina}}
+        close_cover: {action: cover.set_cover_position, data: {position: 100}, target: {entity_id: cover.estores_da_suite_cortina}}
+        stop_cover: {action: cover.stop_cover, target: {entity_id: cover.estores_da_suite_cortina}}
+        set_cover_position: {action: cover.set_cover_position, target: {entity_id: cover.estores_da_suite_cortina}, data: {position: "{{ 100 - position }}"}}
+
+      - name: "Estores da casa de banho da suite"
+        unique_id: estore_wc_suite
+        device_class: shutter
+        position: "{{ 100 - (state_attr('cover.estores_da_casa_de_banho_cortina', 'current_position') | int(100)) }}"
+        availability: "{{ has_value('cover.estores_da_casa_de_banho_cortina') }}"
+        open_cover: {action: cover.close_cover, target: {entity_id: cover.estores_da_casa_de_banho_cortina}}
+        close_cover: {action: cover.set_cover_position, data: {position: 100}, target: {entity_id: cover.estores_da_casa_de_banho_cortina}}
+        stop_cover: {action: cover.stop_cover, target: {entity_id: cover.estores_da_casa_de_banho_cortina}}
+        set_cover_position: {action: cover.set_cover_position, target: {entity_id: cover.estores_da_casa_de_banho_cortina}, data: {position: "{{ 100 - position }}"}}
+
+      - name: "Estores do closet"
+        unique_id: estore_closet
+        device_class: shutter
+        position: "{{ 100 - (state_attr('cover.estores_do_closet_cortina', 'current_position') | int(100)) }}"
+        availability: "{{ has_value('cover.estores_do_closet_cortina') }}"
+        open_cover: {action: cover.close_cover, target: {entity_id: cover.estores_do_closet_cortina}}
+        close_cover: {action: cover.set_cover_position, data: {position: 100}, target: {entity_id: cover.estores_do_closet_cortina}}
+        stop_cover: {action: cover.stop_cover, target: {entity_id: cover.estores_do_closet_cortina}}
+        set_cover_position: {action: cover.set_cover_position, target: {entity_id: cover.estores_do_closet_cortina}, data: {position: "{{ 100 - position }}"}}
+
+      - name: "Estores do escritório do Pai"
+        unique_id: estore_escritorio_pai
+        device_class: shutter
+        position: "{{ 100 - (state_attr('cover.estores_do_escritorio_do_pai_cortina', 'current_position') | int(100)) }}"
+        availability: "{{ has_value('cover.estores_do_escritorio_do_pai_cortina') }}"
+        open_cover: {action: cover.close_cover, target: {entity_id: cover.estores_do_escritorio_do_pai_cortina}}
+        close_cover: {action: cover.set_cover_position, data: {position: 100}, target: {entity_id: cover.estores_do_escritorio_do_pai_cortina}}
+        stop_cover: {action: cover.stop_cover, target: {entity_id: cover.estores_do_escritorio_do_pai_cortina}}
+        set_cover_position: {action: cover.set_cover_position, target: {entity_id: cover.estores_do_escritorio_do_pai_cortina}, data: {position: "{{ 100 - position }}"}}
+
+      - name: "Escadas Rooftop"
+        unique_id: estore_escadas_rooftop
+        device_class: shutter
+        position: "{{ 100 - (state_attr('cover.estores_do_rooftop_cortina', 'current_position') | int(100)) }}"
+        availability: "{{ has_value('cover.estores_do_rooftop_cortina') }}"
+        open_cover: {action: cover.close_cover, target: {entity_id: cover.estores_do_rooftop_cortina}}
+        close_cover: {action: cover.set_cover_position, data: {position: 100}, target: {entity_id: cover.estores_do_rooftop_cortina}}
+        stop_cover: {action: cover.stop_cover, target: {entity_id: cover.estores_do_rooftop_cortina}}
+        set_cover_position: {action: cover.set_cover_position, target: {entity_id: cover.estores_do_rooftop_cortina}, data: {position: "{{ 100 - position }}"}}
+
+      - name: "Rooftop"
+        unique_id: estore_rooftop
+        device_class: shutter
+        position: "{{ 100 - (state_attr('cover.estores_do_ginasio_cortina', 'current_position') | int(100)) }}"
+        availability: "{{ has_value('cover.estores_do_ginasio_cortina') }}"
+        open_cover: {action: cover.close_cover, target: {entity_id: cover.estores_do_ginasio_cortina}}
+        close_cover: {action: cover.set_cover_position, data: {position: 100}, target: {entity_id: cover.estores_do_ginasio_cortina}}
+        stop_cover: {action: cover.stop_cover, target: {entity_id: cover.estores_do_ginasio_cortina}}
+        set_cover_position: {action: cover.set_cover_position, target: {entity_id: cover.estores_do_ginasio_cortina}, data: {position: "{{ 100 - position }}"}}
+
+      - name: "Janela Rooftop"
+        unique_id: estore_janela_rooftop
+        device_class: shutter
+        position: "{{ 100 - (state_attr('cover.estores_da_janela_do_ginasio_cortina', 'current_position') | int(100)) }}"
+        availability: "{{ has_value('cover.estores_da_janela_do_ginasio_cortina') }}"
+        open_cover: {action: cover.close_cover, target: {entity_id: cover.estores_da_janela_do_ginasio_cortina}}
+        close_cover: {action: cover.set_cover_position, data: {position: 100}, target: {entity_id: cover.estores_da_janela_do_ginasio_cortina}}
+        stop_cover: {action: cover.stop_cover, target: {entity_id: cover.estores_da_janela_do_ginasio_cortina}}
+        set_cover_position: {action: cover.set_cover_position, target: {entity_id: cover.estores_da_janela_do_ginasio_cortina}, data: {position: "{{ 100 - position }}"}}

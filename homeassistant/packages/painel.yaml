@@ -1,0 +1,9 @@
+# Ajudas do painel "Casa" (so interface, sem automacoes).
+
+input_select:
+  energia_vista:
+    name: Energia - vista
+    icon: mdi:chart-donut
+    options:
+      - Agora
+      - Hoje

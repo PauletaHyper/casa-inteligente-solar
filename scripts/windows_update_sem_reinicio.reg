@@ -1,0 +1,10 @@
+Windows Registry Editor Version 5.00
+
+; Impede o Windows Update de reiniciar o portatil sozinho enquanto houver
+; uma sessao iniciada (o portatil serve o Home Assistant 24/7).
+; As atualizacoes continuam a ser descarregadas e instaladas; o reinicio
+; fica a espera que alguem o faca (Iniciar -> Energia -> Atualizar e reiniciar).
+; Para desfazer: windows_update_repor.reg
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU]
+"NoAutoRebootWithLoggedOnUsers"=dword:00000001

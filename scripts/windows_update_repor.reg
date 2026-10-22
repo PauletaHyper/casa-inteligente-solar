@@ -1,0 +1,7 @@
+Windows Registry Editor Version 5.00
+
+; Desfaz windows_update_sem_reinicio.reg: o Windows Update volta a poder
+; reiniciar o portatil sozinho (comportamento normal do Windows).
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU]
+"NoAutoRebootWithLoggedOnUsers"=-

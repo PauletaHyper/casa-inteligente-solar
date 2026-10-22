@@ -1,0 +1,184 @@
+# ==========================================================================
+# AC DO QUARTO DO FILHO - desligar sozinho a noite (2026-10-13)
+# ==========================================================================
+# O Filho liga o AC a noite para adormecer com o quarto fresco. Esta
+# automacao NUNCA liga o AC, so o desliga:
+#  - quando o quarto chega a temperatura alvo (20 C) e la fica 15 min, ou
+#  - ao fim do tempo maximo (60 min) - o que acontecer primeiro.
+# So entre as 23:00 e as 11:00. 5 min antes do limite manda um aviso para o
+# telemovel com o botao "+30 min". Se o AC for desligado a mao, para tudo;
+# se voltar a ser ligado, conta de novo.
+# Temperatura: sensor do proprio AC (mede junto a unidade; arrefece um pouco
+# mais depressa do que o resto do quarto).
+# ==========================================================================
+
+input_boolean:
+  ac_noite_ativa:
+    name: AC quarto - desligar sozinho a noite
+    icon: mdi:sleep
+
+input_number:
+  ac_noite_temp:
+    name: AC quarto - desliga quando o quarto chega a
+    min: 16
+    max: 28
+    step: 0.5
+    unit_of_measurement: "°C"
+    icon: mdi:thermometer-check
+  ac_noite_minutos_estavel:
+    name: AC quarto - minutos a essa temperatura
+    min: 0
+    max: 60
+    step: 5
+    unit_of_measurement: min
+    icon: mdi:timer-sand
+  ac_noite_max:
+    name: AC quarto - tempo maximo ligado
+    min: 15
+    max: 240
+    step: 15
+    unit_of_measurement: min
+    icon: mdi:timer-off-outline
+
+timer:
+  ac_filho_noite:
+    name: AC quarto - desliga daqui a
+    restore: true
+
+automation:
+
+  # Comeca a contar quando o AC e ligado de noite (ou as 23:00 se ja
+  # estava ligado).
+  - id: ac_noite_iniciar
+    alias: "AC quarto - comecar a contar (noite)"
+    mode: restart
+    trigger:
+      - trigger: state
+        entity_id: climate.ac_filho
+        from: "off"
+      - trigger: time
+        at: "23:00:00"
+    condition:
+      - {condition: state, entity_id: input_boolean.ac_noite_ativa, state: "on"}
+      - {condition: time, after: "23:00:00", before: "11:00:00"}
+      - "{{ states('climate.ac_filho') not in ['off', 'unavailable', 'unknown'] }}"
+      # As 23:00 nao reinicia uma contagem que ja esteja a decorrer.
+      - "{{ trigger.platform == 'state' or is_state('timer.ac_filho_noite', 'idle') }}"
+    action:
+      - action: timer.start
+        target: {entity_id: timer.ac_filho_noite}
+        data:
+          duration: "{{ (states('input_number.ac_noite_max') | int(60)) * 60 }}"
+
+  # Desligado a mao -> cancela a contagem.
+  - id: ac_noite_cancelar
+    alias: "AC quarto - cancelar contagem se desligado"
+    mode: single
+    trigger:
+      - trigger: state
+        entity_id: climate.ac_filho
+        to: "off"
+    condition:
+      - {condition: state, entity_id: timer.ac_filho_noite, state: active}
+    action:
+      - action: timer.cancel
+        target: {entity_id: timer.ac_filho_noite}
+
+  # Quarto ja fresco -> desliga mais cedo.
+  - id: ac_noite_desligar_temperatura
+    alias: "AC quarto - desligar quando o quarto esta fresco"
+    mode: single
+    trigger:
+      - trigger: template
+        value_template: >-
+          {{ states('sensor.ac_filho_temperatura_da_divisao') | float(99)
+             <= states('input_number.ac_noite_temp') | float(20) }}
+        for:
+          minutes: "{{ states('input_number.ac_noite_minutos_estavel') | int(15) }}"
+    condition:
+      - {condition: state, entity_id: timer.ac_filho_noite, state: active}
+    action:
+      - action: timer.cancel
+        target: {entity_id: timer.ac_filho_noite}
+      - action: climate.turn_off
+        target: {entity_id: climate.ac_filho}
+      - action: notify.mobile_app_tlm_filho
+        data:
+          title: "AC desligado"
+          message: >-
+            O quarto chegou aos {{ states('sensor.ac_filho_temperatura_da_divisao') }} °C.
+            Boa noite!
+          data: {tag: ac_noite}
+
+  # Tempo maximo atingido.
+  - id: ac_noite_desligar_tempo
+    alias: "AC quarto - desligar ao fim do tempo maximo"
+    mode: single
+    trigger:
+      - trigger: event
+        event_type: timer.finished
+        event_data: {entity_id: timer.ac_filho_noite}
+    action:
+      - action: climate.turn_off
+        target: {entity_id: climate.ac_filho}
+      - action: notify.mobile_app_tlm_filho
+        data:
+          title: "AC desligado"
+          message: "Passou o tempo maximo. Boa noite!"
+          data: {tag: ac_noite}
+
+  # Aviso 5 min antes, com botao para prolongar.
+  - id: ac_noite_aviso
+    alias: "AC quarto - aviso 5 min antes de desligar"
+    mode: single
+    trigger:
+      - trigger: template
+        value_template: >-
+          {% set f = state_attr('timer.ac_filho_noite', 'finishes_at') %}
+          {{ is_state('timer.ac_filho_noite', 'active') and f is not none
+             and now() >= as_datetime(f) - timedelta(minutes=5) }}
+    action:
+      - action: notify.mobile_app_tlm_filho
+        data:
+          title: "AC do quarto"
+          message: >-
+            Vou desligar o AC as
+            {{ as_local(as_datetime(state_attr('timer.ac_filho_noite', 'finishes_at'))).strftime('%H:%M') }}.
+          data:
+            tag: ac_noite
+            actions:
+              - action: AC_NOITE_MAIS_30
+                title: "+30 min"
+              - action: AC_NOITE_DESLIGAR_JA
+                title: "Desligar já"
+
+  - id: ac_noite_botoes
+    alias: "AC quarto - botoes do aviso"
+    mode: single
+    trigger:
+      - trigger: event
+        event_type: mobile_app_notification_action
+        event_data: {action: AC_NOITE_MAIS_30}
+        id: mais
+      - trigger: event
+        event_type: mobile_app_notification_action
+        event_data: {action: AC_NOITE_DESLIGAR_JA}
+        id: ja
+    action:
+      - choose:
+          - conditions: "{{ trigger.id == 'mais' and is_state('timer.ac_filho_noite', 'active') }}"
+            sequence:
+              - variables:
+                  falta: >-
+                    {{ ((as_datetime(state_attr('timer.ac_filho_noite', 'finishes_at'))
+                        - now()).total_seconds()) | int(0) }}
+              - action: timer.start
+                target: {entity_id: timer.ac_filho_noite}
+                data:
+                  duration: "{{ [falta, 0] | max + 1800 }}"
+          - conditions: "{{ trigger.id == 'ja' }}"
+            sequence:
+              - action: timer.cancel
+                target: {entity_id: timer.ac_filho_noite}
+              - action: climate.turn_off
+                target: {entity_id: climate.ac_filho}

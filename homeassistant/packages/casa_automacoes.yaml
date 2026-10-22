@@ -1,0 +1,321 @@
+# ==========================================================================
+# AUTOMACOES DA CASA (2026-10-13) - pedidas pelo Filho
+# ==========================================================================
+#  1. Lavandaria: roupa pronta + "ha sol a sobrar"  -> Mãe
+#  3. Resumo de energia do dia as 21:00             -> Pai
+#  8. Toda a gente saiu: coisas ligadas + alarme     -> todos (botao "Desligar tudo")
+# 11. Luzes exteriores + varandas ao por do sol, ate as 23:00
+# 15. Estore da garagem nao fechou as 23:30         -> todos
+# 16. Aparelho offline > 1 h / manutencao dos robos -> todos
+# ==========================================================================
+
+input_boolean:
+  luzes_exterior_auto:
+    name: Luzes exteriores - automatico
+    icon: mdi:outdoor-lamp
+
+script:
+  notificar_todos:
+    alias: "Notificar todos (Filho, Pai, Mãe)"
+    mode: parallel
+    fields:
+      title: {description: "Titulo"}
+      message: {description: "Mensagem"}
+      data: {description: "Dados extra - acoes e tag"}
+    sequence:
+      - parallel:
+          - action: notify.mobile_app_tlm_filho
+            data: {title: "{{ title }}", message: "{{ message }}", data: "{{ data | default({}) }}"}
+            continue_on_error: true
+          - action: notify.mobile_app_tlm_pai
+            data: {title: "{{ title }}", message: "{{ message }}", data: "{{ data | default({}) }}"}
+            continue_on_error: true
+          - action: notify.mobile_app_tlm_mae
+            data: {title: "{{ title }}", message: "{{ message }}", data: "{{ data | default({}) }}"}
+            continue_on_error: true
+
+automation:
+
+  # ===== 1. LAVANDARIA -> MAE =====
+  - id: lavandaria_roupa_pronta
+    alias: "Lavandaria - roupa pronta"
+    mode: queued
+    trigger:
+      - trigger: state
+        entity_id: sensor.lavandaria_maquina_de_lavar_estado_da_maquina
+        from: run
+        to: stop
+        id: Máquina de lavar
+      - trigger: state
+        entity_id: sensor.lavandaria_secador_estado_da_maquina
+        from: run
+        to: stop
+        id: Secador
+    action:
+      - action: notify.mobile_app_tlm_mae
+        data:
+          title: "{{ trigger.id }}"
+          message: "{{ 'A roupa está pronta para estender.' if trigger.id == 'Máquina de lavar' else 'A roupa está seca.' }}"
+
+  - id: lavandaria_sol_a_sobrar
+    alias: "Lavandaria - ha sol a sobrar para lavar"
+    mode: single
+    trigger:
+      - trigger: template
+        value_template: >-
+          {{ states('sensor.solax_inverter_battery_capacity') | float(0) >= 95
+             and states('sensor.rede_media_5min') | float(0) >= 1000 }}
+        for: "00:15:00"
+    condition:
+      - {condition: time, after: "10:00:00", before: "15:30:00"}
+      - {condition: state, entity_id: person.mae, state: home}
+      - {condition: state, entity_id: sensor.lavandaria_maquina_de_lavar_estado_da_maquina, state: stop}
+      # No maximo uma vez por dia.
+      - >-
+        {{ this.attributes.last_triggered is none
+           or as_local(this.attributes.last_triggered).date() < now().date() }}
+    action:
+      - action: notify.mobile_app_tlm_mae
+        data:
+          title: "Há sol a sobrar ☀️"
+          message: >-
+            Bateria a {{ states('sensor.solax_inverter_battery_capacity') }} % e a casa
+            está a vender {{ states('sensor.rede_media_5min') | float(0) | round(0) }} W à rede.
+            Boa altura para pôr a máquina a lavar.
+
+  # ===== 3. RESUMO DO DIA -> PAI =====
+  - id: energia_resumo_diario
+    alias: "Energia - resumo do dia (21:00)"
+    mode: single
+    trigger:
+      - {trigger: time, at: "21:00:00"}
+    action:
+      - variables:
+          solar: "{{ states('sensor.solax_inverter_today_s_solar_energy') | float(0) }}"
+          comprado: "{{ states('sensor.solax_inverter_today_s_import_energy') | float(0) }}"
+          vendido: "{{ states('sensor.solax_inverter_today_s_export_energy') | float(0) }}"
+          bat_in: "{{ states('sensor.solax_inverter_battery_input_energy_today') | float(0) }}"
+          bat_out: "{{ states('sensor.solax_inverter_battery_output_energy_today') | float(0) }}"
+          consumo: "{{ [solar + comprado - vendido + bat_out - bat_in, 0.01] | max }}"
+          proprio: "{{ (100 * (1 - comprado / consumo)) | round(0) }}"
+      - action: notify.mobile_app_tlm_pai
+        data:
+          title: "Energia de hoje"
+          message: >-
+            ☀️ Produção {{ solar | round(1) }} kWh · 🏠 Consumo {{ consumo | round(1) }} kWh ·
+            🔌 Comprado {{ comprado | round(1) }} kWh · ↗️ Vendido {{ vendido | round(1) }} kWh ·
+            {{ proprio }} % da casa feita com energia própria.
+
+  # ===== 8. TODA A GENTE SAIU -> TODOS =====
+  - id: casa_vazia_verificar
+    alias: "Casa vazia - verificar o que ficou ligado"
+    mode: single
+    trigger:
+      - trigger: numeric_state
+        entity_id: zone.home
+        below: 1
+        for: "00:05:00"
+    action:
+      - variables:
+          ligados: &ligados >-
+            {% set ids = states.climate | rejectattr('state', 'in', ['off', 'unavailable', 'unknown'])
+                 | map(attribute='entity_id') | list %}
+            {% set ids = ids + (expand(
+                 'light.jardim_tapo_smart_bulb', 'light.jardim_tapo_smart_bulb_2',
+                 'switch.luz_da_piscina_sonoff_xxxxxxxxxx_1',
+                 'switch.luz_da_garagem_sonoff_xxxxxxxxxx_1', 'switch.luz_da_entrada_sonoff_xxxxxxxxxx_switch',
+                 'switch.luz_da_varanda_da_cozinha_sonoff_xxxxxxxxxx_switch',
+                 'switch.luz_da_varanda_da_suite_sonoff_xxxxxxxxxx_switch',
+                 'switch.aquecedor_suite_tomada_1', 'switch.toalheiro_suite_tomada_1',
+                 'switch.desumidificador_suite_tomada_1', 'switch.toalheiro_filho_tomada_1',
+                 'humidifier.desumidificador_filho')
+               | selectattr('state', 'eq', 'on') | map(attribute='entity_id') | list) %}
+            {{ ids }}
+          alarme_off: "{{ is_state('alarm_control_panel.multifunction_alarm', 'disarmed') }}"
+      - condition: "{{ ligados | count > 0 or alarme_off }}"
+      - action: script.notificar_todos
+        data:
+          title: "Saíram todos de casa"
+          message: >-
+            {% if ligados | count > 0 %}Ficou ligado: {{ ligados | map('state_attr', 'friendly_name') | join(', ') }}.{% endif %}
+            {% if alarme_off %}O alarme está desligado.{% endif %}
+          data:
+            tag: casa_vazia
+            actions: >-
+              {{ [{'action': 'CASA_DESLIGAR_TUDO', 'title': 'Desligar tudo'}] if ligados | count > 0 else [] }}
+
+  - id: casa_vazia_desligar_tudo
+    alias: "Casa vazia - botao Desligar tudo"
+    mode: single
+    trigger:
+      - trigger: event
+        event_type: mobile_app_notification_action
+        event_data: {action: CASA_DESLIGAR_TUDO}
+    action:
+      - variables:
+          ligados: *ligados
+      - if: "{{ ligados | count > 0 }}"
+        then:
+          - action: homeassistant.turn_off
+            target: {entity_id: "{{ ligados }}"}
+          - action: script.notificar_todos
+            data:
+              title: "Casa"
+              message: "Desliguei {{ ligados | count }} aparelho(s)."
+              data: {tag: casa_vazia}
+
+  # ===== 11. LUZES EXTERIORES E VARANDAS =====
+  - id: luzes_exterior_ligar
+    alias: "Luzes exteriores - ligar ao por do sol"
+    mode: single
+    trigger:
+      - trigger: sun
+        event: sunset
+    condition:
+      - {condition: state, entity_id: input_boolean.luzes_exterior_auto, state: "on"}
+      - {condition: time, before: "23:00:00"}
+    action:
+      - action: homeassistant.turn_on
+        target:
+          entity_id: &luzes_exterior
+            # "Luz exterior 0/1/2" da SmartThings sao as mesmas luzes que a
+            # varanda da cozinha / varanda da suite / entrada (eWeLink) -
+            # escondidas, usam-se so as do eWeLink.
+            # A luz da entrada saiu a 14/10 (pedido do Filho).
+            - light.jardim_tapo_smart_bulb
+            - light.jardim_tapo_smart_bulb_2
+            - switch.luz_da_varanda_da_cozinha_sonoff_xxxxxxxxxx_switch
+            - switch.luz_da_varanda_da_suite_sonoff_xxxxxxxxxx_switch
+        continue_on_error: true
+
+  - id: luzes_exterior_desligar
+    alias: "Luzes exteriores - desligar as 23:00"
+    mode: single
+    trigger:
+      - {trigger: time, at: "23:00:00"}
+    condition:
+      - {condition: state, entity_id: input_boolean.luzes_exterior_auto, state: "on"}
+    action:
+      - action: homeassistant.turn_off
+        target:
+          entity_id: *luzes_exterior
+        continue_on_error: true
+
+  # ===== LUZ DA GARAGEM (pedido 21/10) =====
+  # Acende ao por do sol e apaga as 00:30. Usa o mesmo interruptor
+  # "Luzes exteriores - automatico".
+  - id: luz_garagem_ligar
+    alias: "Luz da garagem - ligar ao por do sol"
+    mode: single
+    trigger:
+      - trigger: sun
+        event: sunset
+    condition:
+      - {condition: state, entity_id: input_boolean.luzes_exterior_auto, state: "on"}
+    action:
+      - action: switch.turn_on
+        target: {entity_id: switch.luz_da_garagem_sonoff_xxxxxxxxxx_1}
+        continue_on_error: true
+
+  - id: luz_garagem_desligar
+    alias: "Luz da garagem - desligar as 00:30"
+    mode: single
+    trigger:
+      - {trigger: time, at: "00:30:00"}
+    condition:
+      - {condition: state, entity_id: input_boolean.luzes_exterior_auto, state: "on"}
+    action:
+      - action: switch.turn_off
+        target: {entity_id: switch.luz_da_garagem_sonoff_xxxxxxxxxx_1}
+        continue_on_error: true
+
+  # ===== 15. ESTORE DA GARAGEM NAO FECHOU =====
+  - id: garagem_estore_aberto_noite
+    alias: "Garagem - estore nao fechou a noite"
+    mode: single
+    trigger:
+      - trigger: time
+        at: "23:35:00"
+    condition:
+      - "{{ not is_state('cover.estore_da_garagem_local', 'closed') }}"
+    action:
+      # So para o Filho (pedido 13/10).
+      - action: notify.mobile_app_tlm_filho
+        data:
+          title: "Estore da garagem"
+          message: >-
+            {% if has_value('cover.estore_da_garagem_local') %}O estore da garagem ainda está aberto.
+            {% else %}Não consigo confirmar se o estore da garagem fechou (sem ligação).{% endif %}
+
+  # ===== 16. APARELHOS OFFLINE / MANUTENCAO =====
+  - id: aparelho_offline
+    alias: "Aviso - aparelho offline ha mais de 1 hora"
+    mode: queued
+    trigger:
+      - trigger: state
+        entity_id:
+          - cover.estores_da_sala_cortina
+          - cover.estores_da_sala_de_estar_cortina
+          - cover.estores_da_cozinha_cortina
+          - cover.estores_do_escritorio_da_mae_cortina
+          - cover.estores_da_suite_cortina
+          - cover.estores_da_casa_de_banho_cortina
+          - cover.estores_do_closet_cortina
+          - cover.estores_do_escritorio_do_pai_cortina
+          - cover.estores_do_quarto_do_filho_cortina
+          - cover.estores_do_rooftop_cortina
+          - cover.estores_do_ginasio_cortina
+          - cover.estores_da_janela_do_ginasio_cortina
+          - climate.ac_filho
+          - climate.ac_escritorio_pai
+          - climate.ac_suite
+          - climate.ac_cozinha
+          - climate.ac_ecritorio
+          - climate.ac_sala
+          - climate.ac_rooftop
+          - switch.termossifao_interruptor
+          - vacuum.toby
+          - vacuum.bob
+          - alarm_control_panel.multifunction_alarm
+          - light.jardim_tapo_smart_bulb
+          - light.jardim_tapo_smart_bulb_2
+          - switch.luz_da_entrada_sonoff_xxxxxxxxxx_switch
+          - switch.luz_da_garagem_sonoff_xxxxxxxxxx_1
+          - switch.luz_da_piscina_sonoff_xxxxxxxxxx_1
+          - switch.luz_da_varanda_da_cozinha_sonoff_xxxxxxxxxx_switch
+          - switch.luz_da_varanda_da_suite_sonoff_xxxxxxxxxx_switch
+          - switch.toalheiro_suite_tomada_1
+          - switch.toalheiro_filho_tomada_1
+          - switch.aquecedor_suite_tomada_1
+          - switch.desumidificador_suite_tomada_1
+          - humidifier.desumidificador_filho
+        to: unavailable
+        for: "01:00:00"
+    action:
+      - action: script.notificar_todos
+        data:
+          title: "Aparelho offline"
+          message: >-
+            {{ state_attr(trigger.entity_id, 'friendly_name') or trigger.entity_id }}
+            está sem ligação há mais de 1 hora.
+
+  - id: robos_manutencao
+    alias: "Aviso - manutencao dos robos"
+    mode: queued
+    trigger:
+      - trigger: numeric_state
+        entity_id:
+          - sensor.toby_vida_util_do_filtro
+          - sensor.toby_vida_util_da_escova_lateral
+          - sensor.toby_vida_util_da_escova_rotativa
+          - sensor.bob_vida_util_do_filtro
+          - sensor.bob_vida_util_da_escova_lateral
+          - sensor.bob_vida_util_da_escova_rotativa
+        below: 300
+    action:
+      - action: script.notificar_todos
+        data:
+          title: "Robô - manutenção"
+          message: >-
+            {{ state_attr(trigger.entity_id, 'friendly_name') }}: faltam
+            {{ (trigger.to_state.state | float(0) / 60) | round(0) }} h. Altura de limpar ou trocar.

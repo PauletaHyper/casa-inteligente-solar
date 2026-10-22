@@ -1,0 +1,8 @@
+.env
+secrets.yaml
+config/
+influxdb/
+grafana/data/
+*.db
+*.log
+__pycache__/

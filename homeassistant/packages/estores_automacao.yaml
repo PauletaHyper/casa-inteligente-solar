@@ -1,0 +1,680 @@
+# ==========================================================================
+# ESTORES - horario + protecao do sol da tarde (2026-10-12)
+# ==========================================================================
+# Plano completo e decisoes em PLANO-ESTORES.md.
+# - Horario fixo: abrir (dias uteis / fim de semana e feriados, via
+#   binary_sensor.workday_sensor_pt), fechar todos ao por do sol, garagem e
+#   cozinha as 23:30 (cozinha so desce ate 30 %).
+# - Protecao solar: so os 4 estores da fachada da rua (poente), so se
+#   estiverem totalmente abertos, so com sol a bater nessa fachada, sol a
+#   serio (producao solar) e calor. Volta a abrir quando o sol sai da
+#   fachada. Se alguem mexer no estore entretanto, fica em "manual" ate
+#   ao dia seguinte.
+# Usa os estores corrigidos de estores.yaml (nunca os *_cortina, exceto
+# o quarto do Filho, que ja estava certo).
+# Horas e valores sem "initial" (definidos uma vez pela UI/API).
+# ==========================================================================
+
+input_boolean:
+  gestao_estores_ativa:
+    name: Estores - gestao automatica
+    icon: mdi:window-shutter-auto
+  estores_protecao_solar:
+    name: Estores - protecao do sol da tarde
+    icon: mdi:weather-sunny-alert
+  estores_modo_ferias:
+    name: Estores - modo ferias (nao abre de manha)
+    icon: mdi:bag-suitcase
+  # Estacao (21/10): muda sozinha pela previsao do tempo se ligado.
+  estacao_auto:
+    name: Estacao - mudar sozinha pela previsao
+    icon: mdi:weather-partly-snowy-rainy
+  # Marca que hoje os estores ja fecharam ao por do sol (dia frio de
+  # inverno), para o fecho das +30 min nao repetir. Reposto as 04:00.
+  estores_fechou_cedo:
+    name: Estores - hoje fecharam ao por do sol (frio)
+    icon: mdi:snowflake-thermometer
+
+input_datetime:
+  # Hora do por do sol de hoje (registada ao por do sol) - usada para saber,
+  # depois de um reinicio, se ja passou a hora de fechar (sem o erro de 1 h
+  # do "next_setting - 24 h" nos dias de mudanca da hora).
+  estores_por_do_sol:
+    name: Estores - por do sol de hoje
+    has_date: true
+    has_time: true
+  estores_util_garagem:
+    name: Estores - dia util - abrir garagem
+    has_date: false
+    has_time: true
+  estores_util_wc_suite:
+    name: Estores - dia util - abrir WC suite
+    has_date: false
+    has_time: true
+  estores_util_geral:
+    name: Estores - dia util - abrir piso 0, rooftop, suite, closet, esc. Pai
+    has_date: false
+    has_time: true
+  estores_util_filho:
+    name: Estores - dia util - abrir quarto Filho
+    has_date: false
+    has_time: true
+  estores_fds_garagem:
+    name: Estores - fim de semana - abrir garagem
+    has_date: false
+    has_time: true
+  estores_fds_geral:
+    name: Estores - fim de semana - abrir piso 0 e rooftop
+    has_date: false
+    has_time: true
+  estores_fecho_tarde:
+    name: Estores - fechar garagem e cozinha
+    has_date: false
+    has_time: true
+
+input_number:
+  estores_cozinha_noite:
+    name: Estores - cozinha a noite (posicao)
+    mode: box
+    min: 0
+    max: 100
+    step: 5
+    unit_of_measurement: "%"
+    icon: mdi:window-shutter-settings
+  estores_sombra:
+    name: Estores - posicao de sombra
+    mode: box
+    min: 0
+    max: 100
+    step: 5
+    unit_of_measurement: "%"
+    icon: mdi:window-shutter
+  estores_sombra_forte:
+    name: Estores - posicao de sombra forte
+    mode: box
+    min: 0
+    max: 100
+    step: 5
+    unit_of_measurement: "%"
+    icon: mdi:window-shutter
+  estores_temp_interior:
+    name: Estores - divisao a partir de (protege)
+    mode: box
+    min: 18
+    max: 30
+    step: 0.5
+    unit_of_measurement: "°C"
+    icon: mdi:home-thermometer
+  estores_temp_exterior:
+    name: Estores - exterior a partir de (protege)
+    mode: box
+    min: 15
+    max: 40
+    step: 0.5
+    unit_of_measurement: "°C"
+    icon: mdi:thermometer
+  estores_temp_forte:
+    name: Estores - divisao a partir de (sombra forte)
+    mode: box
+    min: 20
+    max: 32
+    step: 0.5
+    unit_of_measurement: "°C"
+    icon: mdi:thermometer-alert
+  estores_pv_sol:
+    name: Estores - producao solar minima (ha sol)
+    mode: box
+    min: 0
+    max: 4000
+    step: 50
+    unit_of_measurement: W
+    icon: mdi:solar-power
+  estores_azimute_inicio:
+    name: Estores - sol na fachada da rua a partir do azimute
+    mode: box
+    min: 90
+    max: 360
+    step: 1
+    unit_of_measurement: "°"
+    icon: mdi:compass-outline
+  estores_azimute_fim:
+    name: Estores - sol na fachada da rua ate ao azimute
+    mode: box
+    min: 90
+    max: 360
+    step: 1
+    unit_of_measurement: "°"
+    icon: mdi:compass-outline
+  estores_elevacao_min:
+    name: Estores - elevacao minima do sol
+    mode: box
+    min: 0
+    max: 45
+    step: 1
+    unit_of_measurement: "°"
+    icon: mdi:angle-acute
+  estacao_inverno_abaixo:
+    name: Estacao - Inverno se a maxima prevista (3 dias) for abaixo de
+    mode: box
+    min: 5
+    max: 30
+    step: 0.5
+    unit_of_measurement: "°C"
+    icon: mdi:snowflake
+  estacao_verao_acima:
+    name: Estacao - Verao se a maxima prevista (3 dias) for acima de
+    mode: box
+    min: 10
+    max: 35
+    step: 0.5
+    unit_of_measurement: "°C"
+    icon: mdi:white-balance-sunny
+  estores_frio_limiar:
+    name: Estores - Inverno - fechar ao por do sol se o exterior estiver abaixo de
+    mode: box
+    min: -5
+    max: 25
+    step: 0.5
+    unit_of_measurement: "°C"
+    icon: mdi:thermometer-low
+
+# Estado da protecao solar de cada estore poente:
+# livre = a automacao pode mexer; sombra/forte = foi a automacao que baixou;
+# manual = alguem mexeu, nao tocar ate ao dia seguinte.
+input_select:
+  # Estacao (21/10): a protecao do sol da tarde so atua no Verao; no
+  # Inverno, em dias frios, os estores fecham logo ao por do sol.
+  estacao:
+    name: Estacao
+    icon: mdi:sun-snowflake-variant
+    options: [Verão, Inverno]
+  estore_modo_sala_de_estar:
+    name: Estore sala de estar - protecao solar
+    options: [livre, sombra, forte, manual]
+  estore_modo_escritorio_mae:
+    name: Estore escritorio Mãe - protecao solar
+    options: [livre, sombra, forte, manual]
+  estore_modo_quarto_filho:
+    name: Estore quarto Filho - protecao solar
+    options: [livre, sombra, forte, manual]
+  estore_modo_escritorio_pai:
+    name: Estore escritorio Pai - protecao solar
+    options: [livre, sombra, forte, manual]
+
+# Garagem: tenta pela ligacao local (tuya-local); se ao fim de 90 s nao
+# estiver na posicao pedida, usa a cena da cloud da Smart Life
+# ("Abrir estore garagem" / "Fechar estore garagem", criadas pelo Filho).
+script:
+  # Move estores e confirma: 1 min depois ve quais nao chegaram a posicao
+  # pedida e repete so esses (ate 3 vezes). A cloud Tuya as vezes ignora
+  # comandos (13/10: sala, sala de estar e cozinha nao mexeram).
+  estores_mover:
+    alias: "Estores - mover com confirmacao"
+    mode: parallel
+    fields:
+      alvos: {description: "Lista de cover.*"}
+      acao: {description: "abrir, fechar ou posicao"}
+      posicao: {description: "Posicao 0-100 (so para acao posicao)"}
+    sequence:
+      - variables:
+          alvo_pos: "{{ 100 if acao == 'abrir' else (0 if acao == 'fechar' else posicao | int(0)) }}"
+          lista: "{{ [alvos] if alvos is string else alvos }}"
+      - repeat:
+          sequence:
+            - variables:
+                faltam: >-
+                  {% set ns = namespace(l=[]) %}
+                  {% for e in lista %}
+                    {% set p = state_attr(e, 'current_position') %}
+                    {# Sem posicao conhecida (ex.: garagem sem ligacao local) so
+                       se manda uma vez: a confirmacao fica a cargo do proprio
+                       estore_garagem_mover. #}
+                    {% if repeat.first or (p is not none and (p | int - alvo_pos) | abs > 5) %}
+                      {% set ns.l = ns.l + [e] %}
+                    {% endif %}
+                  {% endfor %}
+                  {{ ns.l }}
+            # 15/10: um estore de cada vez (2 s entre cada) e cada comando
+            # num script a parte (script.turn_on, sem esperar): se a cloud
+            # Tuya rejeitar um ("sign invalid"), os outros continuam. As
+            # 09:00 de 15/10 um erro destes parou tudo e so abriu 1 estore.
+            - repeat:
+                for_each: "{{ faltam }}"
+                sequence:
+                  - action: script.turn_on
+                    target: {entity_id: script.estore_comando}
+                    data:
+                      variables:
+                        alvo: "{{ repeat.item }}"
+                        acao: "{{ acao }}"
+                        posicao: "{{ alvo_pos }}"
+                  - delay: "00:00:02"
+            - if: "{{ faltam | count > 0 }}"
+              then:
+                - delay: "00:01:00"
+          until: >-
+            {% set ok = namespace(n=0) %}
+            {% for e in lista %}
+              {% set p = state_attr(e, 'current_position') %}
+              {% if p is none or (p | int - alvo_pos) | abs <= 5 %}{% set ok.n = ok.n + 1 %}{% endif %}
+            {% endfor %}
+            {{ repeat.index >= 3 or ok.n == lista | count }}
+
+  # Modo cinema (pedido 15/10): fecha os dois estores da sala e desce o da
+  # cozinha 60 % (fica 40 % aberto).
+  modo_cinema:
+    alias: "Estores - modo cinema"
+    icon: mdi:movie-open
+    mode: single
+    sequence:
+      - parallel:
+          - action: script.estores_mover
+            data:
+              acao: fechar
+              alvos: [cover.estores_da_sala, cover.estores_da_sala_de_estar]
+          - action: script.estores_mover
+            data:
+              acao: posicao
+              posicao: 40
+              alvos: [cover.estores_da_cozinha]
+
+  # Sair do modo cinema: repoe a sala e a cozinha como deviam estar a esta
+  # hora segundo o horario (de dia abre; depois do fecho da noite a sala
+  # fica fechada e a cozinha aberta; depois das 23:30 a cozinha a 25 %).
+  sair_modo_cinema:
+    alias: "Estores - sair do modo cinema"
+    icon: mdi:movie-open-off
+    mode: single
+    sequence:
+      - variables:
+          noite: >-
+            {{ is_state('sun.sun', 'below_horizon') and
+               ((now().hour >= 12 and now() >= as_datetime(state_attr('sun.sun', 'next_setting'))
+                  - timedelta(hours=24) + timedelta(minutes=30))
+                or now() < today_at('05:00')) }}
+          tarde: >-
+            {{ now() >= today_at(states('input_datetime.estores_fecho_tarde'))
+               or now() < today_at('05:00') }}
+      - if: "{{ not noite }}"
+        then:
+          - action: script.estores_mover
+            data:
+              acao: abrir
+              alvos: [cover.estores_da_sala, cover.estores_da_sala_de_estar, cover.estores_da_cozinha]
+        else:
+          - action: script.estores_mover
+            data:
+              acao: posicao
+              posicao: "{{ states('input_number.estores_cozinha_noite') | int(25) if tarde else 100 }}"
+              alvos: [cover.estores_da_cozinha]
+
+  # Um comando para um estore. Corre a parte para que um erro da cloud
+  # Tuya fique so aqui e nao interrompa quem o chamou.
+  estore_comando:
+    alias: "Estores - comando para um estore"
+    mode: parallel
+    max: 30
+    fields:
+      alvo: {description: "cover.*"}
+      acao: {description: "abrir, fechar ou posicao"}
+      posicao: {description: "0-100"}
+    sequence:
+      - choose:
+          - conditions: "{{ acao == 'abrir' }}"
+            sequence:
+              - action: cover.open_cover
+                target: {entity_id: "{{ alvo }}"}
+          - conditions: "{{ acao == 'fechar' }}"
+            sequence:
+              - action: cover.close_cover
+                target: {entity_id: "{{ alvo }}"}
+        default:
+          - action: cover.set_cover_position
+            target: {entity_id: "{{ alvo }}"}
+            data: {position: "{{ posicao | int(0) }}"}
+
+  estore_garagem_mover:
+    alias: "Estore da garagem - mover (local, com reserva pela cloud)"
+    mode: restart
+    fields:
+      acao:
+        description: abrir ou fechar
+        example: fechar
+    sequence:
+      - variables:
+          alvo: "{{ 'open' if acao == 'abrir' else 'closed' }}"
+          cena: "{{ 'scene.abrir_estore_garagem' if acao == 'abrir' else 'scene.fechar_estore_garagem' }}"
+      - if: "{{ has_value('cover.estore_da_garagem_local') }}"
+        then:
+          - action: "{{ 'cover.open_cover' if acao == 'abrir' else 'cover.close_cover' }}"
+            target: {entity_id: cover.estore_da_garagem_local}
+            continue_on_error: true
+          - wait_template: "{{ is_state('cover.estore_da_garagem_local', alvo) }}"
+            timeout: "00:01:30"
+            continue_on_timeout: true
+      - if: "{{ not is_state('cover.estore_da_garagem_local', alvo) }}"
+        then:
+          - if: "{{ cena in (states.scene | map(attribute='entity_id') | list) }}"
+            then:
+              - action: scene.turn_on
+                target: {entity_id: "{{ cena }}"}
+              - action: logbook.log
+                data:
+                  name: Estore da garagem
+                  message: "ligacao local falhou - {{ acao }} pela cloud (cena)"
+                  entity_id: cover.estore_da_garagem
+            else:
+              - action: persistent_notification.create
+                data:
+                  title: "Estore da garagem"
+                  message: >-
+                    Nao consegui {{ acao }} o estore da garagem: a ligacao local
+                    falhou e a cena "{{ 'Abrir' if acao == 'abrir' else 'Fechar' }}
+                    estore garagem" ainda nao existe na Smart Life.
+
+sensor:
+  - platform: statistics
+    name: "Solar media 10min"
+    unique_id: solar_media_10min
+    entity_id: sensor.solax_inverter_pv_power_total
+    state_characteristic: mean
+    max_age:
+      minutes: 10
+    sampling_size: 300
+    keep_last_sample: true
+
+automation:
+
+  # ===== ABRIR - DIAS UTEIS =====
+  - id: estores_abrir_util
+    alias: "Estores - abrir (dias uteis)"
+    mode: queued
+    trigger:
+      - {trigger: time, at: input_datetime.estores_util_garagem, id: garagem}
+      - {trigger: time, at: input_datetime.estores_util_wc_suite, id: wc}
+      - {trigger: time, at: input_datetime.estores_util_geral, id: geral}
+      - {trigger: time, at: input_datetime.estores_util_filho, id: filho}
+    condition:
+      - {condition: state, entity_id: input_boolean.gestao_estores_ativa, state: "on"}
+      - {condition: state, entity_id: input_boolean.estores_modo_ferias, state: "off"}
+      - {condition: state, entity_id: binary_sensor.workday_sensor_pt, state: "on"}
+    action:
+      - action: script.estores_mover
+        data:
+          acao: abrir
+          alvos: >-
+            {{ {
+              'garagem': ['cover.estore_da_garagem'],
+              'wc': ['cover.estores_da_casa_de_banho_da_suite'],
+              'geral': ['cover.estores_da_suite', 'cover.estores_do_closet',
+                        'cover.estores_do_escritorio_do_pai',
+                        'cover.escadas_rooftop', 'cover.rooftop', 'cover.janela_rooftop',
+                        'cover.estores_da_sala', 'cover.estores_da_sala_de_estar',
+                        'cover.estores_da_cozinha', 'cover.estores_do_escritorio_da_mae'],
+              'filho': ['cover.estores_do_quarto_do_filho_cortina']
+            }[trigger.id] }}
+
+  # ===== ABRIR - FIM DE SEMANA E FERIADOS =====
+  # O piso 1 fica fechado: cada um abre o seu a mao.
+  - id: estores_abrir_fds
+    alias: "Estores - abrir (fim de semana e feriados)"
+    mode: queued
+    trigger:
+      - {trigger: time, at: input_datetime.estores_fds_garagem, id: garagem}
+      - {trigger: time, at: input_datetime.estores_fds_geral, id: geral}
+    condition:
+      - {condition: state, entity_id: input_boolean.gestao_estores_ativa, state: "on"}
+      - {condition: state, entity_id: input_boolean.estores_modo_ferias, state: "off"}
+      - {condition: state, entity_id: binary_sensor.workday_sensor_pt, state: "off"}
+    action:
+      - action: script.estores_mover
+        data:
+          acao: abrir
+          alvos: >-
+            {{ {
+              'garagem': ['cover.estore_da_garagem'],
+              'geral': ['cover.escadas_rooftop', 'cover.rooftop', 'cover.janela_rooftop',
+                        'cover.estores_da_sala', 'cover.estores_da_sala_de_estar',
+                        'cover.estores_da_cozinha', 'cover.estores_do_escritorio_da_mae']
+            }[trigger.id] }}
+
+  # ===== FECHAR =====
+  - id: estores_fechar
+    alias: "Estores - fechar a noite"
+    mode: queued
+    trigger:
+      # Desde 13/10: ao por do sol (antes era as 21:00).
+      # Desde 14/10: 30 min depois do por do sol (ainda ha luz logo apos).
+      - {trigger: sun, event: sunset, offset: "00:30:00", id: geral}
+      # Desde 21/10: no Inverno, em dias frios, logo ao por do sol.
+      - {trigger: sun, event: sunset, id: cedo}
+      - {trigger: time, at: input_datetime.estores_fecho_tarde, id: tarde}
+    condition:
+      - {condition: state, entity_id: input_boolean.gestao_estores_ativa, state: "on"}
+    action:
+      - if: "{{ trigger.id == 'cedo' }}"
+        then:
+          - action: input_datetime.set_datetime
+            target: {entity_id: input_datetime.estores_por_do_sol}
+            data: {timestamp: "{{ now().timestamp() }}"}
+      - variables:
+          exterior: >-
+            {{ states('sensor.ac_sala_temperatura_exterior')
+               | float(state_attr('weather.forecast_casa', 'temperature') | float(99)) }}
+          frio: >-
+            {{ is_state('input_select.estacao', 'Inverno')
+               and exterior < states('input_number.estores_frio_limiar') | float(12) }}
+      - choose:
+          - conditions: >-
+              {{ (trigger.id == 'cedo' and frio)
+                 or (trigger.id == 'geral' and is_state('input_boolean.estores_fechou_cedo', 'off')) }}
+            sequence:
+              - if: "{{ trigger.id == 'cedo' }}"
+                then:
+                  - action: input_boolean.turn_on
+                    target: {entity_id: input_boolean.estores_fechou_cedo}
+              - action: script.estores_mover
+                data:
+                  acao: fechar
+                  alvos: &fecho_geral
+                    - cover.estores_da_sala
+                    - cover.estores_da_sala_de_estar
+                    - cover.estores_do_escritorio_da_mae
+                    - cover.estores_da_suite
+                    - cover.estores_da_casa_de_banho_da_suite
+                    - cover.estores_do_closet
+                    - cover.estores_do_escritorio_do_pai
+                    - cover.estores_do_quarto_do_filho_cortina
+                    - cover.escadas_rooftop
+                    - cover.rooftop
+                    - cover.janela_rooftop
+              - &reset_modos
+                action: input_select.select_option
+                target:
+                  entity_id:
+                    - input_select.estore_modo_sala_de_estar
+                    - input_select.estore_modo_escritorio_mae
+                    - input_select.estore_modo_quarto_filho
+                    - input_select.estore_modo_escritorio_pai
+                data: {option: livre}
+          - conditions: "{{ trigger.id == 'tarde' }}"
+            sequence:
+              - &fecho_garagem
+                action: cover.close_cover
+                target: {entity_id: cover.estore_da_garagem}
+              - &fecho_cozinha
+                action: script.estores_mover
+                data:
+                  acao: posicao
+                  alvos: [cover.estores_da_cozinha]
+                  posicao: "{{ states('input_number.estores_cozinha_noite') | int(25) }}"
+
+  # Se o HA reiniciar a noite, garante que ficou tudo fechado.
+  - id: estores_fechar_apos_reinicio
+    alias: "Estores - garantir fecho apos reinicio"
+    mode: single
+    trigger:
+      - {trigger: homeassistant, event: start}
+    condition:
+      - {condition: state, entity_id: input_boolean.gestao_estores_ativa, state: "on"}
+      # Depois da hora de fecho de hoje (por do sol registado hoje; + 30 min
+      # se nao fecharam cedo) ou de madrugada. Se o HA esteve parado ao por
+      # do sol, usa next_setting - 24 h (aproximado).
+      - >-
+        {% set ps = state_attr('input_datetime.estores_por_do_sol', 'timestamp') %}
+        {% set hoje = ps is not none and (ps | timestamp_custom('%Y-%m-%d')) == now().strftime('%Y-%m-%d')
+                      and (ps | timestamp_custom('%H') | int) >= 12 %}
+        {% set pds = as_local(as_datetime(ps)) if hoje
+             else as_datetime(state_attr('sun.sun', 'next_setting')) - timedelta(hours=24) %}
+        {% set extra = timedelta(minutes=0) if is_state('input_boolean.estores_fechou_cedo', 'on')
+             else timedelta(minutes=30) %}
+        {{ (is_state('sun.sun', 'below_horizon') and now().hour >= 12 and now() >= pds + extra)
+           or now() < today_at('05:00') }}
+    action:
+      - delay: "00:01:00"
+      - action: script.estores_mover
+        data:
+          acao: fechar
+          alvos: *fecho_geral
+      - if: "{{ now() >= today_at(states('input_datetime.estores_fecho_tarde')) or now() < today_at('05:00') }}"
+        then:
+          - *fecho_garagem
+          - *fecho_cozinha
+
+  # Novo dia: a protecao solar volta a poder mexer em todos.
+  - id: estores_reset_diario
+    alias: "Estores - reset diario da protecao solar"
+    mode: single
+    trigger:
+      - {trigger: time, at: "04:00:00"}
+    action:
+      - *reset_modos
+      - action: input_boolean.turn_off
+        target: {entity_id: input_boolean.estores_fechou_cedo}
+
+  # ===== PROTECAO DO SOL DA TARDE (fachada da rua / poente) =====
+  - id: estores_protecao_solar
+    alias: "Estores - protecao do sol da tarde"
+    mode: single
+    trigger:
+      - {trigger: time_pattern, minutes: "/10"}
+    condition:
+      - {condition: state, entity_id: input_boolean.gestao_estores_ativa, state: "on"}
+      - {condition: state, entity_id: input_boolean.estores_protecao_solar, state: "on"}
+      - {condition: time, after: "11:00:00"}
+      - {condition: state, entity_id: sun.sun, state: above_horizon}
+      # Desde 21/10: so no Verao (no Inverno o sol da tarde aquece a casa).
+      - {condition: state, entity_id: input_select.estacao, state: "Verão"}
+    action:
+      - variables:
+          az: "{{ state_attr('sun.sun', 'azimuth') | float(0) }}"
+          el: "{{ state_attr('sun.sun', 'elevation') | float(0) }}"
+          sol_na_fachada: >-
+            {{ az >= states('input_number.estores_azimute_inicio') | float(190)
+               and az <= states('input_number.estores_azimute_fim') | float(300)
+               and el >= states('input_number.estores_elevacao_min') | float(8) }}
+          sol_saiu: >-
+            {{ az > 180 and (az > states('input_number.estores_azimute_fim') | float(300)
+               or el < states('input_number.estores_elevacao_min') | float(8)) }}
+          ha_sol: >-
+            {{ states('sensor.solar_media_10min') | float(0)
+               >= states('input_number.estores_pv_sol') | float(800) }}
+          exterior: >-
+            {{ states('sensor.ac_sala_temperatura_exterior')
+               | float(state_attr('weather.forecast_casa', 'temperature') | float(0)) }}
+          sombra: "{{ states('input_number.estores_sombra') | int(25) }}"
+          forte: "{{ states('input_number.estores_sombra_forte') | int(5) }}"
+          t_int: "{{ states('input_number.estores_temp_interior') | float(24) }}"
+          t_ext: "{{ states('input_number.estores_temp_exterior') | float(25) }}"
+          t_forte: "{{ states('input_number.estores_temp_forte') | float(26) }}"
+      - repeat:
+          for_each:
+            - {cover: cover.estores_da_sala_de_estar, temp: sensor.ac_sala_temperatura_da_divisao, modo: input_select.estore_modo_sala_de_estar}
+            - {cover: cover.estores_do_escritorio_da_mae, temp: sensor.ac_ecritorio_temperatura_da_divisao, modo: input_select.estore_modo_escritorio_mae}
+            - {cover: cover.estores_do_quarto_do_filho_cortina, temp: sensor.ac_filho_temperatura_da_divisao, modo: input_select.estore_modo_quarto_filho}
+            - {cover: cover.estores_do_escritorio_do_pai, temp: sensor.ac_escritorio_pai_temperatura_da_divisao, modo: input_select.estore_modo_escritorio_pai}
+          sequence:
+            - variables:
+                pos: "{{ state_attr(repeat.item.cover, 'current_position') | int(-1) }}"
+                modo: "{{ states(repeat.item.modo) }}"
+                t_div: "{{ states(repeat.item.temp) | float(0) }}"
+                quente: "{{ t_div >= t_int or exterior >= t_ext }}"
+                muito_quente: "{{ t_div >= t_forte }}"
+            - choose:
+                # Alguem mexeu desde que a automacao o baixou -> manual.
+                - conditions: >-
+                    {{ (modo == 'sombra' and (pos - sombra) | abs > 5)
+                       or (modo == 'forte' and (pos - forte) | abs > 5) }}
+                  sequence:
+                    - action: input_select.select_option
+                      target: {entity_id: "{{ repeat.item.modo }}"}
+                      data: {option: manual}
+                # Sol saiu da fachada -> voltar a abrir.
+                - conditions: "{{ modo in ['sombra', 'forte'] and sol_saiu }}"
+                  sequence:
+                    # open_cover (fim de curso), nao posicao 100: por
+                    # percentagem os estores param a meio a subir.
+                    - action: cover.open_cover
+                      target: {entity_id: "{{ repeat.item.cover }}"}
+                    - action: input_select.select_option
+                      target: {entity_id: "{{ repeat.item.modo }}"}
+                      data: {option: livre}
+                # Totalmente aberto + sol forte na fachada + calor -> baixar.
+                - conditions: >-
+                    {{ modo == 'livre' and pos >= 95 and sol_na_fachada and ha_sol and quente }}
+                  sequence:
+                    - action: cover.set_cover_position
+                      target: {entity_id: "{{ repeat.item.cover }}"}
+                      data: {position: "{{ forte if muito_quente else sombra }}"}
+                    - action: input_select.select_option
+                      target: {entity_id: "{{ repeat.item.modo }}"}
+                      data: {option: "{{ 'forte' if muito_quente else 'sombra' }}"}
+                # Ja em sombra mas a divisao continua a aquecer -> sombra forte.
+                - conditions: "{{ modo == 'sombra' and sol_na_fachada and muito_quente }}"
+                  sequence:
+                    - action: cover.set_cover_position
+                      target: {entity_id: "{{ repeat.item.cover }}"}
+                      data: {position: "{{ forte }}"}
+                    - action: input_select.select_option
+                      target: {entity_id: "{{ repeat.item.modo }}"}
+                      data: {option: forte}
+
+  # ===== ESTACAO PELA PREVISAO DO TEMPO (21/10) =====
+  # Media das maximas previstas para os proximos 3 dias (met.no):
+  # abaixo de "Inverno se..." -> Inverno; acima de "Verao se..." -> Verao;
+  # no meio fica como esta (evita trocar a toda a hora na meia-estacao).
+  - id: estacao_pela_previsao
+    alias: "Estacao - mudar pela previsao do tempo"
+    mode: single
+    trigger:
+      - {trigger: time, at: "06:00:00"}
+      - {trigger: homeassistant, event: start}
+      - {trigger: state, entity_id: input_boolean.estacao_auto, to: "on"}
+    condition:
+      - {condition: state, entity_id: input_boolean.estacao_auto, state: "on"}
+    action:
+      - action: weather.get_forecasts
+        target: {entity_id: weather.forecast_casa}
+        data: {type: daily}
+        response_variable: previsao
+      - variables:
+          maximas: >-
+            {{ (previsao['weather.forecast_casa'].forecast | default([]))[:3]
+               | map(attribute='temperature') | select('number') | list }}
+          media: "{{ (maximas | sum / maximas | count) | round(1) if maximas | count > 0 else none }}"
+          nova: >-
+            {% if media is none %}{{ states('input_select.estacao') }}
+            {% elif media < states('input_number.estacao_inverno_abaixo') | float(18) %}Inverno
+            {% elif media > states('input_number.estacao_verao_acima') | float(22) %}Verão
+            {% else %}{{ states('input_select.estacao') }}{% endif %}
+      - if: "{{ nova | trim != states('input_select.estacao') }}"
+        then:
+          - action: input_select.select_option
+            target: {entity_id: input_select.estacao}
+            data: {option: "{{ nova | trim }}"}
+          - action: notify.mobile_app_tlm_filho
+            data:
+              title: "Estores - mudança de estação"
+              message: >-
+                Passei para {{ nova | trim }} (máximas previstas para 3 dias:
+                {{ media }} °C).
