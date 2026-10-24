@@ -11,6 +11,9 @@
 #     solar se tiver sido a vigilancia a pausa-la.
 #  3. Estores: se o HA esteve parado a hora de abrir, abre ao arrancar
 #     (so os grupos cuja hora passou durante a paragem, e so de dia).
+#     Desde 24/10 espera ate 12 min que os estores fiquem disponiveis.
+#  4. (24/10) Ao arrancar, recarrega a Tuya, o MELCloud e o eWeLink se
+#     ficarem em baixo (ate 3 vezes, de 3 em 3 min) e avisa se nao chegar.
 # ==========================================================================
 
 input_datetime:
@@ -172,11 +175,77 @@ automation:
             {{ ns.l }}
       - if: "{{ grupos | count > 0 }}"
         then:
-          - action: script.estores_mover
-            data:
-              acao: abrir
-              alvos: "{{ grupos }}"
+          # 24/10: ao arrancar sem rede a Tuya ainda nao tinha ligado e a
+          # abertura falhou. Espera que os estores fiquem disponiveis (a
+          # automacao 4 recarrega a Tuya se for preciso).
+          - wait_template: "{{ grupos | select('is_state', 'unavailable') | list | count == 0 }}"
+            timeout: "00:12:00"
+            continue_on_timeout: true
+          - variables:
+              prontos: "{{ grupos | reject('is_state', 'unavailable') | list }}"
+          - if: "{{ prontos | count > 0 }}"
+            then:
+              - action: script.estores_mover
+                data:
+                  acao: abrir
+                  alvos: "{{ prontos }}"
           - action: notify.mobile_app_tlm_filho
             data:
               title: "Estores"
-              message: "Abri {{ grupos | count }} estore(s) que ficaram por abrir enquanto o HA esteve parado."
+              message: >-
+                Abri {{ prontos | count }} estore(s) que ficaram por abrir enquanto o HA esteve parado.
+                {% if prontos | count < grupos | count %}{{ grupos | count - prontos | count }} continuam indisponiveis e ficaram por abrir.{% endif %}
+
+  # ===== 4. INTEGRACOES CLOUD: RECARREGAR AS QUE FALHARAM AO ARRANCAR =====
+  # 24/10: o portatil arrancou antes de o Wi-Fi estar pronto e a Tuya, o
+  # MELCloud e o eWeLink ficaram em baixo ate um reinicio manual. Uma
+  # integracao conta como em baixo quando todas as entidades de teste estao
+  # indisponiveis (um aparelho desligado sozinho nao a faz recarregar).
+  - id: integracoes_recarregar_arranque
+    alias: "Integracoes - recarregar as que falharam ao arrancar"
+    mode: single
+    trigger:
+      - {trigger: homeassistant, event: start}
+    variables:
+      integracoes:
+        Tuya: [cover.estores_da_sala_cortina, cover.estores_da_cozinha_cortina, cover.estores_da_suite_cortina]
+        MELCloud: [climate.ac_sala, climate.ac_suite, climate.ac_cozinha]
+        eWeLink: [switch.luz_da_entrada_sonoff_xxxxxxxxxx_switch, switch.luz_da_garagem_sonoff_xxxxxxxxxx_1, switch.luz_da_piscina_sonoff_xxxxxxxxxx_1]
+    action:
+      - repeat:
+          count: 3
+          sequence:
+            - delay: "00:03:00"
+            - variables:
+                falhadas: >-
+                  {% set ns = namespace(l=[]) %}
+                  {% for nome, ents in integracoes.items() %}
+                    {% if ents | select('is_state', 'unavailable') | list | count == ents | count %}{% set ns.l = ns.l + [nome] %}{% endif %}
+                  {% endfor %}
+                  {{ ns.l }}
+            - if: "{{ falhadas | count == 0 }}"
+              then:
+                - stop: "Integracoes todas ligadas"
+            - repeat:
+                for_each: "{{ falhadas }}"
+                sequence:
+                  - action: homeassistant.reload_config_entry
+                    target: {entity_id: "{{ integracoes[repeat.item][0] }}"}
+                    continue_on_error: true
+      # Tres recargas nao chegaram -> avisar.
+      - delay: "00:03:00"
+      - variables:
+          falhadas: >-
+            {% set ns = namespace(l=[]) %}
+            {% for nome, ents in integracoes.items() %}
+              {% if ents | select('is_state', 'unavailable') | list | count == ents | count %}{% set ns.l = ns.l + [nome] %}{% endif %}
+            {% endfor %}
+            {{ ns.l }}
+      - if: "{{ falhadas | count > 0 }}"
+        then:
+          - action: notify.mobile_app_tlm_filho
+            data:
+              title: "Integracoes em baixo"
+              message: >-
+                {{ falhadas | join(', ') }} continua(m) sem ligacao depois de 3 recargas.
+                Ve em Configuracao > Dispositivos e servicos (pode pedir nova autenticacao).

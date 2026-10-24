@@ -14,3 +14,4 @@
 | Valores mudavam sozinhos | Barras deslizantes arrastadas sem querer no telemóvel | Campos numéricos (`mode: box`) |
 | Contador de energia de um AC "impossível" | Multi-split: a energia da unidade exterior conta toda numa unidade interior | Teste controlado (ligar um AC, ver qual contador sobe) e renomear o contador |
 | Câmaras desapareceram | Mudaram de IP depois de um reinício do router | Correção dos IPs + reservas DHCP |
+| Integrações cloud em baixo depois de uma falha de corrente | O servidor arrancou antes de o Wi-Fi estar pronto: Tuya, MELCloud e eWeLink falharam a ligação e a recuperação dos estores desistiu | Ao arrancar, recarregar as integrações que ficaram todas indisponíveis (até 3 vezes, com aviso no fim); a recuperação dos estores espera que eles fiquem disponíveis |
